@@ -1,3 +1,5 @@
+"use client";
+
 import React, { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Calendar, Download, Plus, Trash2, Calculator } from "lucide-react";
@@ -6,8 +8,13 @@ import jsPDF from "jspdf";
 // IHT Seller Net Sheet Generator (Realtor-facing)
 // Single-file React component.
 // - Indiana tax proration (arrears)
-// - IHT seller fee section
+// - IHT seller fee section (county-based fee schedule)
 // - Owner’s policy premium auto-calc from chart
+// Updates requested:
+// 1) Split commission into Listing Agent + Buyer’s Agent
+// 2) Do NOT auto-check Deed Recording and Transfer Fee
+// 3) County as dropdown with all Indiana counties
+// 4) Use Valparaiso fee schedule for specific counties
 
 // -----------------------------
 // Utilities
@@ -71,6 +78,105 @@ function daysBetweenInclusiveUTC(start: Date, end: Date) {
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
+
+// -----------------------------
+// Indiana Counties
+// -----------------------------
+
+const IN_COUNTIES = [
+  "Adams",
+  "Allen",
+  "Bartholomew",
+  "Benton",
+  "Blackford",
+  "Boone",
+  "Brown",
+  "Carroll",
+  "Cass",
+  "Clark",
+  "Clay",
+  "Clinton",
+  "Crawford",
+  "Daviess",
+  "Dearborn",
+  "Decatur",
+  "DeKalb",
+  "Delaware",
+  "Dubois",
+  "Elkhart",
+  "Fayette",
+  "Floyd",
+  "Fountain",
+  "Franklin",
+  "Fulton",
+  "Gibson",
+  "Grant",
+  "Greene",
+  "Hamilton",
+  "Hancock",
+  "Harrison",
+  "Hendricks",
+  "Henry",
+  "Howard",
+  "Huntington",
+  "Jackson",
+  "Jasper",
+  "Jay",
+  "Jefferson",
+  "Jennings",
+  "Johnson",
+  "Knox",
+  "Kosciusko",
+  "LaGrange",
+  "Lake",
+  "LaPorte",
+  "Lawrence",
+  "Madison",
+  "Marion",
+  "Marshall",
+  "Martin",
+  "Miami",
+  "Monroe",
+  "Montgomery",
+  "Morgan",
+  "Newton",
+  "Noble",
+  "Ohio",
+  "Orange",
+  "Owen",
+  "Parke",
+  "Perry",
+  "Pike",
+  "Porter",
+  "Posey",
+  "Pulaski",
+  "Putnam",
+  "Randolph",
+  "Ripley",
+  "Rush",
+  "St. Joseph",
+  "Scott",
+  "Shelby",
+  "Spencer",
+  "Starke",
+  "Steuben",
+  "Sullivan",
+  "Switzerland",
+  "Tippecanoe",
+  "Tipton",
+  "Union",
+  "Vanderburgh",
+  "Vermillion",
+  "Vigo",
+  "Wabash",
+  "Warren",
+  "Warrick",
+  "Washington",
+  "Wayne",
+  "Wells",
+  "White",
+  "Whitley",
+];
 
 // -----------------------------
 // Owner’s Policy Premium (from fee sheet chart)
@@ -204,14 +310,79 @@ function calcOwnersPolicyPremium(liabilityAmount: number, choice: OwnerPremiumCh
 }
 
 // -----------------------------
-// IHT Seller Title Fees
+// IHT Seller Title Fees (Standard vs. Valpo Schedule)
 // -----------------------------
 
 type TitleFeeItem = { label: string; amount: number };
 
+type FeeSchedule = {
+  settlementWithLoanSeller: number;
+  settlementCashSeller: number;
+  titleProcessingSeller: number;
+  closingProcessingSeller: number;
+  cplSeller: number;
+  tieffSeller: number;
+  deedRecordingMarion: number;
+  deedRecordingOther: number;
+  simplifilePerDoc: number;
+  transferPlusSDF: number;
+};
+
+const STANDARD_SCHEDULE: FeeSchedule = {
+  settlementWithLoanSeller: 390,
+  settlementCashSeller: 290,
+  // legacy defaults for non-Valpo counties (keep unless you provide a different sheet)
+  titleProcessingSeller: 175,
+  closingProcessingSeller: 150,
+  cplSeller: 25,
+  tieffSeller: 5,
+  deedRecordingMarion: 35,
+  deedRecordingOther: 25,
+  simplifilePerDoc: 4.25,
+  transferPlusSDF: 30,
+};
+
+// Valparaiso schedule (effective 9/1/2025) — seller side values from your pasted table
+const VALPO_SCHEDULE: FeeSchedule = {
+  settlementWithLoanSeller: 390,
+  settlementCashSeller: 290,
+  titleProcessingSeller: 225,
+  closingProcessingSeller: 175,
+  cplSeller: 25,
+  tieffSeller: 5,
+  deedRecordingMarion: 35,
+  deedRecordingOther: 25,
+  simplifilePerDoc: 4.25,
+  transferPlusSDF: 30,
+};
+
+const VALPO_COUNTIES = new Set(
+  [
+    "Lake",
+    "Porter",
+    "LaPorte",
+    "St. Joseph",
+    "Elkhart",
+    "Kosciusko",
+    "Marshall",
+    "Fulton",
+    "Pulaski",
+    "Starke",
+    "Jasper",
+    "Newton",
+    "White",
+    "Cass",
+  ].map((x) => x.toLowerCase())
+);
+
+function getFeeScheduleForCounty(county: string): FeeSchedule {
+  const key = (county || "").trim().toLowerCase();
+  return VALPO_COUNTIES.has(key) ? VALPO_SCHEDULE : STANDARD_SCHEDULE;
+}
+
 type TitleFeeSettings = {
   transactionType: "with_loan" | "cash";
-  countyType: "marion" | "other";
+  county: string;
   useSimplifile: boolean;
   ownerPolicyPremium: number;
   includeSettlementFee: boolean;
@@ -223,27 +394,31 @@ type TitleFeeSettings = {
 
 function calcIhtSellerTitleFees(s: TitleFeeSettings): { items: TitleFeeItem[]; total: number } {
   const items: TitleFeeItem[] = [];
+  const schedule = getFeeScheduleForCounty(s.county);
 
+  // Owner’s policy is optional (often buyer-paid in IN)
   if (s.ownerPolicyPremium > 0) items.push({ label: "Owner’s title policy (estimate)", amount: s.ownerPolicyPremium });
 
   if (s.includeSettlementFee) {
-    const settlement = s.transactionType === "with_loan" ? 390 : 290;
+    const fullSettlement = s.transactionType === "with_loan" ? schedule.settlementWithLoanSeller : schedule.settlementCashSeller;
+    const settlement = round2(fullSettlement / 2);
     items.push({ label: "Settlement / closing fee (seller)", amount: settlement });
   }
 
-  items.push({ label: "Title processing fee (seller)", amount: 175 });
-  items.push({ label: "Closing processing fee (seller)", amount: 150 });
+  items.push({ label: "Title processing fee (seller)", amount: schedule.titleProcessingSeller });
+  items.push({ label: "Closing processing fee (seller)", amount: schedule.closingProcessingSeller });
 
-  if (s.includeCPL) items.push({ label: "CPL (seller)", amount: 25 });
-  if (s.includeTIEFF) items.push({ label: "TIEFF (seller)", amount: 5 });
+  if (s.includeCPL) items.push({ label: "CPL (seller)", amount: schedule.cplSeller });
+  if (s.includeTIEFF) items.push({ label: "TIEFF (seller)", amount: schedule.tieffSeller });
 
   if (s.includeDeedRecording) {
-    const deedRecording = s.countyType === "marion" ? 35 : 25;
+    const isMarion = (s.county || "").trim().toLowerCase() === "marion";
+    const deedRecording = isMarion ? schedule.deedRecordingMarion : schedule.deedRecordingOther;
     items.push({ label: "Recording fee: deed", amount: deedRecording });
-    if (s.useSimplifile) items.push({ label: "Simplifile submission (deed)", amount: 4.25 });
+    if (s.useSimplifile) items.push({ label: "Simplifile submission (deed)", amount: schedule.simplifilePerDoc });
   }
 
-  if (s.includeTransferFeeSDF) items.push({ label: "County transfer fee + SDF", amount: 30 });
+  if (s.includeTransferFeeSDF) items.push({ label: "County transfer fee + SDF", amount: schedule.transferPlusSDF });
 
   const total = round2(items.reduce((sum, x) => sum + (x.amount || 0), 0));
   return { items: items.map((x) => ({ ...x, amount: round2(x.amount) })), total };
@@ -312,13 +487,14 @@ function calcIndianaTaxProration(closingUTC: Date, tax: TaxSettings): TaxBreakdo
 function buildPdf(opts: {
   salePrice: number;
   closingYMD: string;
-  commissionLabel: string;
-  commissionAmount: number;
+  listingCommission: number;
+  buyersCommission: number;
   mortgagePayoff: number;
   sellerConcessions: number;
   otherCosts: { label: string; amount: number }[];
   titleFees: TitleFeeItem[];
   titleFeesTotal: number;
+  county: string;
   tax: TaxBreakdown;
   taxDebitRounded: number;
   estimatedNet: number;
@@ -350,11 +526,15 @@ function buildPdf(opts: {
   const rightX = pageW - margin;
 
   const otherTotal = opts.otherCosts.reduce((a, b) => a + (b.amount || 0), 0);
+  const totalCommission = opts.listingCommission + opts.buyersCommission;
 
   const rows: Array<[string, string]> = [
     ["Sale price", toMoney(opts.salePrice)],
     ["Closing date", opts.closingYMD],
-    ["Commission", `${opts.commissionLabel}  (${toMoney(opts.commissionAmount)})`],
+    ["County", opts.county || ""],
+    ["Listing agent commission", `(${toMoney(opts.listingCommission)})`],
+    ["Buyer’s agent commission", `(${toMoney(opts.buyersCommission)})`],
+    ["Total commission", `(${toMoney(totalCommission)})`],
     ["Mortgage payoff", `(${toMoney(opts.mortgagePayoff)})`],
     ["Seller concessions", `(${toMoney(opts.sellerConcessions)})`],
     ["Other seller-paid costs", `(${toMoney(otherTotal)})`],
@@ -416,17 +596,18 @@ function buildPdf(opts: {
   doc.setFontSize(9);
   doc.setTextColor(60);
   const disclaimer =
-    "Estimate only. Actual prorations, premiums, and settlement charges may differ based on county treasurer records, underwriting rules, and the final settlement statement.";
+    "Estimate only. Actual prorations, premiums, recording charges, and settlement charges may differ based on county treasurer records and the final settlement statement.";
   doc.text(disclaimer, margin, 732, { maxWidth: pageW - margin * 2 });
 
   return doc;
 }
 
 // -----------------------------
-// UI
+// Main App
 // -----------------------------
 
 export default function IHTSellerNetSheetApp() {
+  // Deal inputs
   const [salePriceInput, setSalePriceInput] = useState("330,000");
   const [closingInput, setClosingInput] = useState(() => {
     const now = new Date();
@@ -434,9 +615,16 @@ export default function IHTSellerNetSheetApp() {
     return ymd(addDaysUTC(dt, 10));
   });
 
-  const [commissionType, setCommissionType] = useState<"pct" | "flat">("pct");
-  const [commissionPct, setCommissionPct] = useState("6");
-  const [commissionFlatInput, setCommissionFlatInput] = useState("0");
+  // County dropdown
+  const [county, setCounty] = useState("Marion");
+
+  // Split commission
+  const [listingCommissionType, setListingCommissionType] = useState<"pct" | "flat">("pct");
+  const [buyersCommissionType, setBuyersCommissionType] = useState<"pct" | "flat">("pct");
+  const [listingCommissionPct, setListingCommissionPct] = useState("3");
+  const [buyersCommissionPct, setBuyersCommissionPct] = useState("3");
+  const [listingCommissionFlat, setListingCommissionFlat] = useState("0");
+  const [buyersCommissionFlat, setBuyersCommissionFlat] = useState("0");
 
   const [mortgagePayoffInput, setMortgagePayoffInput] = useState("0");
   const [sellerConcessionsInput, setSellerConcessionsInput] = useState("0");
@@ -447,7 +635,6 @@ export default function IHTSellerNetSheetApp() {
 
   // Title fee inputs (seller)
   const [transactionType, setTransactionType] = useState<"with_loan" | "cash">("with_loan");
-  const [countyType, setCountyType] = useState<"marion" | "other">("marion");
   const [useSimplifile, setUseSimplifile] = useState(true);
 
   const [autoOwnerPolicy, setAutoOwnerPolicy] = useState(true);
@@ -457,8 +644,9 @@ export default function IHTSellerNetSheetApp() {
   const [includeSettlementFee, setIncludeSettlementFee] = useState(true);
   const [includeCPL, setIncludeCPL] = useState(true);
   const [includeTIEFF, setIncludeTIEFF] = useState(true);
-  const [includeDeedRecording, setIncludeDeedRecording] = useState(true);
-  const [includeTransferFeeSDF, setIncludeTransferFeeSDF] = useState(true);
+  // Requested: DO NOT auto-check these
+  const [includeDeedRecording, setIncludeDeedRecording] = useState(false);
+  const [includeTransferFeeSDF, setIncludeTransferFeeSDF] = useState(false);
 
   // Tax inputs
   const [priorYearTaxInput, setPriorYearTaxInput] = useState("3,200");
@@ -482,13 +670,17 @@ export default function IHTSellerNetSheetApp() {
     return dt ?? new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()));
   }, [closingInput]);
 
-  const commissionAmount = useMemo(() => {
-    if (commissionType === "pct") {
-      const pct = parseNumber(commissionPct);
-      return salePrice * (pct / 100);
-    }
-    return parseNumber(commissionFlatInput);
-  }, [commissionType, commissionPct, commissionFlatInput, salePrice]);
+  const listingCommission = useMemo(() => {
+    if (listingCommissionType === "pct") return salePrice * (parseNumber(listingCommissionPct) / 100);
+    return parseNumber(listingCommissionFlat);
+  }, [listingCommissionType, listingCommissionPct, listingCommissionFlat, salePrice]);
+
+  const buyersCommission = useMemo(() => {
+    if (buyersCommissionType === "pct") return salePrice * (parseNumber(buyersCommissionPct) / 100);
+    return parseNumber(buyersCommissionFlat);
+  }, [buyersCommissionType, buyersCommissionPct, buyersCommissionFlat, salePrice]);
+
+  const totalCommission = useMemo(() => round2(listingCommission + buyersCommission), [listingCommission, buyersCommission]);
 
   const otherCostsTotal = useMemo(() => otherCosts.reduce((sum, c) => sum + parseNumber(c.amountInput), 0), [otherCosts]);
 
@@ -501,7 +693,7 @@ export default function IHTSellerNetSheetApp() {
   const sellerFeeCalc = useMemo(() => {
     return calcIhtSellerTitleFees({
       transactionType,
-      countyType,
+      county,
       useSimplifile,
       ownerPolicyPremium,
       includeSettlementFee,
@@ -512,7 +704,7 @@ export default function IHTSellerNetSheetApp() {
     });
   }, [
     transactionType,
-    countyType,
+    county,
     useSimplifile,
     ownerPolicyPremium,
     includeSettlementFee,
@@ -544,16 +736,15 @@ export default function IHTSellerNetSheetApp() {
   const estimatedNet = useMemo(() => {
     const net =
       salePrice -
-      commissionAmount -
+      listingCommission -
+      buyersCommission -
       mortgagePayoff -
       sellerConcessions -
       otherCostsTotal -
       sellerTitleFeesTotal -
       taxDebitRounded;
     return round2(net);
-  }, [salePrice, commissionAmount, mortgagePayoff, sellerConcessions, otherCostsTotal, sellerTitleFeesTotal, taxDebitRounded]);
-
-  const commissionLabel = useMemo(() => (commissionType === "pct" ? String(parseNumber(commissionPct)) + "%" : "Flat"), [commissionType, commissionPct]);
+  }, [salePrice, listingCommission, buyersCommission, mortgagePayoff, sellerConcessions, otherCostsTotal, sellerTitleFeesTotal, taxDebitRounded]);
 
   function addOtherCost() {
     setOtherCosts((prev) => [...prev, { id: "c" + Math.random().toString(16).slice(2), label: "Other", amountInput: "0" }]);
@@ -567,19 +758,20 @@ export default function IHTSellerNetSheetApp() {
     const doc = buildPdf({
       salePrice,
       closingYMD: ymd(closingUTC),
-      commissionLabel,
-      commissionAmount: round2(commissionAmount),
+      listingCommission: round2(listingCommission),
+      buyersCommission: round2(buyersCommission),
       mortgagePayoff: round2(mortgagePayoff),
       sellerConcessions: round2(sellerConcessions),
       otherCosts: otherCosts.map((c) => ({ label: c.label, amount: round2(parseNumber(c.amountInput)) })),
       titleFees: sellerTitleFees,
       titleFeesTotal: sellerTitleFeesTotal,
+      county,
       tax,
       taxDebitRounded,
       estimatedNet,
     });
 
-    doc.save(`IHT_Seller_Net_Sheet_${ymmdSafe(ymd(closingUTC))}.pdf`);
+    doc.save(`IHT_Seller_Net_Sheet_${ymd(closingUTC)}.pdf`);
   }
 
   const cardMotion = {
@@ -599,6 +791,9 @@ export default function IHTSellerNetSheetApp() {
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">IHT Seller Net Sheet Generator</h1>
               <p className="text-sm text-neutral-600">Indiana arrears tax proration + IHT seller fees.</p>
+              <p className="text-xs text-neutral-500">
+                County schedule: <span className="font-medium">{VALPO_COUNTIES.has(county.toLowerCase()) ? "Valparaiso" : "Standard"}</span>
+              </p>
             </div>
           </div>
 
@@ -643,46 +838,48 @@ export default function IHTSellerNetSheetApp() {
                   </div>
                 </Field>
 
-                <div className="sm:col-span-2">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="text-sm font-medium">Commission</div>
-                    <div className="inline-flex rounded-2xl bg-neutral-100 p-1">
-                      <button
-                        onClick={() => setCommissionType("pct")}
-                        className={cx("rounded-2xl px-3 py-2 text-sm", commissionType === "pct" ? "bg-white shadow-sm" : "text-neutral-600")}
-                        type="button"
-                      >
-                        %
-                      </button>
-                      <button
-                        onClick={() => setCommissionType("flat")}
-                        className={cx("rounded-2xl px-3 py-2 text-sm", commissionType === "flat" ? "bg-white shadow-sm" : "text-neutral-600")}
-                        type="button"
-                      >
-                        $
-                      </button>
-                    </div>
+                <Field label="County" hint="Used for fee schedule + recording tier">
+                  <select
+                    value={county}
+                    onChange={(e) => setCounty(e.target.value)}
+                    className="w-full rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
+                  >
+                    {IN_COUNTIES.map((c) => (
+                      <option key={c} value={c}>
+                        {c} County
+                      </option>
+                    ))}
+                  </select>
+                </Field>
 
-                    {commissionType === "pct" ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          value={commissionPct}
-                          onChange={(e) => setCommissionPct(formatInputPercent(e.target.value))}
-                          className="w-28 rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
-                          inputMode="decimal"
-                        />
-                        <span className="text-sm text-neutral-600">%</span>
-                      </div>
-                    ) : (
-                      <input
-                        value={commissionFlatInput}
-                        onChange={(e) => setCommissionFlatInput(formatInputMoney(e.target.value))}
-                        className="w-48 rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
-                        inputMode="decimal"
-                      />
-                    )}
+                <div className="sm:col-span-2">
+                  <div className="text-sm font-semibold">Commission</div>
+
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <CommissionRow
+                      title="Listing Agent Commission"
+                      type={listingCommissionType}
+                      setType={setListingCommissionType}
+                      pct={listingCommissionPct}
+                      setPct={setListingCommissionPct}
+                      flat={listingCommissionFlat}
+                      setFlat={setListingCommissionFlat}
+                      computed={listingCommission}
+                    />
+
+                    <CommissionRow
+                      title="Buyer’s Agent Commission"
+                      type={buyersCommissionType}
+                      setType={setBuyersCommissionType}
+                      pct={buyersCommissionPct}
+                      setPct={setBuyersCommissionPct}
+                      flat={buyersCommissionFlat}
+                      setFlat={setBuyersCommissionFlat}
+                      computed={buyersCommission}
+                    />
                   </div>
-                  <div className="mt-2 text-xs text-neutral-500">Calculated commission: {toMoney(round2(commissionAmount))}</div>
+
+                  <div className="mt-2 text-xs text-neutral-500">Total commission: {toMoney(totalCommission)}</div>
                 </div>
 
                 <Field label="Mortgage payoff (optional)">
@@ -727,7 +924,11 @@ export default function IHTSellerNetSheetApp() {
                       />
                       <input
                         value={c.amountInput}
-                        onChange={(e) => setOtherCosts((prev) => prev.map((x) => (x.id === c.id ? { ...x, amountInput: formatInputMoney(e.target.value) } : x)))}
+                        onChange={(e) =>
+                          setOtherCosts((prev) =>
+                            prev.map((x) => (x.id === c.id ? { ...x, amountInput: formatInputMoney(e.target.value) } : x))
+                          )
+                        }
                         className="sm:col-span-2 w-full rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
                         inputMode="decimal"
                         placeholder="0"
@@ -751,10 +952,9 @@ export default function IHTSellerNetSheetApp() {
               </div>
 
               <SectionTitleFees
+                county={county}
                 transactionType={transactionType}
                 setTransactionType={setTransactionType}
-                countyType={countyType}
-                setCountyType={setCountyType}
                 useSimplifile={useSimplifile}
                 setUseSimplifile={setUseSimplifile}
                 autoOwnerPolicy={autoOwnerPolicy}
@@ -800,7 +1000,10 @@ export default function IHTSellerNetSheetApp() {
           <motion.div {...cardMotion} className="lg:col-span-1">
             <ResultsCard
               salePrice={salePrice}
-              commissionAmount={commissionAmount}
+              county={county}
+              listingCommission={listingCommission}
+              buyersCommission={buyersCommission}
+              totalCommission={totalCommission}
               mortgagePayoff={mortgagePayoff}
               sellerConcessions={sellerConcessions}
               otherCostsTotal={otherCostsTotal}
@@ -817,20 +1020,14 @@ export default function IHTSellerNetSheetApp() {
   );
 }
 
-function ymmdSafe(s: string) {
-  // keep filename safe
-  return String(s || "").replace(/[^0-9-]/g, "");
-}
-
 // -----------------------------
 // Sections
 // -----------------------------
 
 function SectionTitleFees(props: {
+  county: string;
   transactionType: "with_loan" | "cash";
   setTransactionType: (v: "with_loan" | "cash") => void;
-  countyType: "marion" | "other";
-  setCountyType: (v: "marion" | "other") => void;
   useSimplifile: boolean;
   setUseSimplifile: (v: boolean) => void;
   autoOwnerPolicy: boolean;
@@ -853,10 +1050,14 @@ function SectionTitleFees(props: {
   sellerTitleFees: TitleFeeItem[];
   sellerTitleFeesTotal: number;
 }) {
+  const scheduleName = VALPO_COUNTIES.has(props.county.toLowerCase()) ? "Valparaiso schedule" : "Standard schedule";
+
   return (
     <div className="mt-8 rounded-3xl bg-neutral-50 p-5 ring-1 ring-black/5">
       <h2 className="text-lg font-semibold">2) IHT Title Fees (Seller)</h2>
-      <p className="mt-1 text-sm text-neutral-600">Toggle seller-paid items to match the contract. Owner’s Policy can auto-calc from the chart.</p>
+      <p className="mt-1 text-sm text-neutral-600">
+        Toggle seller-paid items to match the contract. Owner’s Policy can auto-calc from the chart. Active: <span className="font-medium">{scheduleName}</span>.
+      </p>
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
@@ -867,9 +1068,8 @@ function SectionTitleFees(props: {
           </div>
 
           <div className="mt-4 text-sm font-medium">County</div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <Pill active={props.countyType === "marion"} onClick={() => props.setCountyType("marion")} label="Marion" />
-            <Pill active={props.countyType === "other"} onClick={() => props.setCountyType("other")} label="All other" />
+          <div className="mt-2 text-sm text-neutral-700">
+            {props.county} County {props.county.toLowerCase() === "marion" ? "(Marion recording tier)" : ""}
           </div>
 
           <label className="mt-4 flex items-center gap-2 text-sm text-neutral-700">
@@ -983,7 +1183,7 @@ function SectionTaxes(props: {
   return (
     <div className="mt-8 rounded-3xl bg-neutral-50 p-5 ring-1 ring-black/5">
       <h2 className="text-lg font-semibold">3) Indiana Property Taxes (Paid in Arrears)</h2>
-      <p className="mt-1 text-sm text-neutral-600">Uses prior-year taxes as the basis for daily accrual, then reduces debit by any paid installments.</p>
+      <p className="mt-1 text-sm text-neutral-600">Uses prior-year taxes as the basis for daily accrual, then reduces the debit by any paid installments.</p>
 
       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Field label="Prior-year annual tax amount" hint="From the tax bill / treasurer">
@@ -1003,7 +1203,12 @@ function SectionTaxes(props: {
           </div>
 
           <label className="mt-3 flex items-center gap-2 text-sm text-neutral-700">
-            <input type="checkbox" checked={props.force365} onChange={(e) => props.setForce365(e.target.checked)} className="h-4 w-4 rounded border-neutral-300" />
+            <input
+              type="checkbox"
+              checked={props.force365}
+              onChange={(e) => props.setForce365(e.target.checked)}
+              className="h-4 w-4 rounded border-neutral-300"
+            />
             Force 365-day year
           </label>
 
@@ -1035,7 +1240,10 @@ function SectionTaxes(props: {
 
 function ResultsCard(props: {
   salePrice: number;
-  commissionAmount: number;
+  county: string;
+  listingCommission: number;
+  buyersCommission: number;
+  totalCommission: number;
   mortgagePayoff: number;
   sellerConcessions: number;
   otherCostsTotal: number;
@@ -1049,9 +1257,13 @@ function ResultsCard(props: {
     <div className="sticky top-6 rounded-3xl bg-white p-5 shadow-sm ring-1 ring-black/5">
       <h2 className="text-lg font-semibold">4) Results</h2>
 
+      <div className="mt-2 text-xs text-neutral-500">County: {props.county} County</div>
+
       <div className="mt-4 space-y-3">
         <Row k="Sale price" v={toMoney(round2(props.salePrice))} />
-        <Row k="Commission" v={`(${toMoney(round2(props.commissionAmount))})`} />
+        <Row k="Listing agent commission" v={`(${toMoney(round2(props.listingCommission))})`} />
+        <Row k="Buyer’s agent commission" v={`(${toMoney(round2(props.buyersCommission))})`} />
+        <Row k="Total commission" v={`(${toMoney(round2(props.totalCommission))})`} />
         <Row k="Mortgage payoff" v={`(${toMoney(round2(props.mortgagePayoff))})`} />
         <Row k="Seller concessions" v={`(${toMoney(round2(props.sellerConcessions))})`} />
         <Row k="Other costs" v={`(${toMoney(round2(props.otherCostsTotal))})`} />
@@ -1080,9 +1292,7 @@ function ResultsCard(props: {
           </div>
         </div>
 
-        <div className="mt-3 text-[11px] text-neutral-500">
-          Notes: Indiana property taxes are commonly prorated in arrears. Marking installments as paid reduces the seller debit.
-        </div>
+        <div className="mt-3 text-[11px] text-neutral-500">Notes: Indiana property taxes are commonly prorated in arrears. Paid installments reduce the seller’s tax debit.</div>
       </div>
 
       <button
@@ -1154,6 +1364,64 @@ function CheckRow({ label, checked, onChange }: { label: string; checked: boolea
   );
 }
 
+function CommissionRow(props: {
+  title: string;
+  type: "pct" | "flat";
+  setType: (v: "pct" | "flat") => void;
+  pct: string;
+  setPct: (v: string) => void;
+  flat: string;
+  setFlat: (v: string) => void;
+  computed: number;
+}) {
+  return (
+    <div className="rounded-3xl bg-white p-4 ring-1 ring-black/5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold">{props.title}</div>
+        <div className="inline-flex rounded-2xl bg-neutral-100 p-1">
+          <button
+            onClick={() => props.setType("pct")}
+            className={cx("rounded-2xl px-3 py-2 text-sm", props.type === "pct" ? "bg-white shadow-sm" : "text-neutral-600")}
+            type="button"
+          >
+            %
+          </button>
+          <button
+            onClick={() => props.setType("flat")}
+            className={cx("rounded-2xl px-3 py-2 text-sm", props.type === "flat" ? "bg-white shadow-sm" : "text-neutral-600")}
+            type="button"
+          >
+            $
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3">
+        {props.type === "pct" ? (
+          <div className="flex items-center gap-2">
+            <input
+              value={props.pct}
+              onChange={(e) => props.setPct(formatInputPercent(e.target.value))}
+              className="w-28 rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
+              inputMode="decimal"
+            />
+            <span className="text-sm text-neutral-600">%</span>
+          </div>
+        ) : (
+          <input
+            value={props.flat}
+            onChange={(e) => props.setFlat(formatInputMoney(e.target.value))}
+            className="w-full rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm outline-none focus:border-neutral-900"
+            inputMode="decimal"
+          />
+        )}
+      </div>
+
+      <div className="mt-2 text-xs text-neutral-500">Calculated: {toMoney(round2(props.computed))}</div>
+    </div>
+  );
+}
+
 function TaxInstallment({
   title,
   subtitle,
@@ -1181,7 +1449,6 @@ function TaxInstallment({
           Paid
         </label>
       </div>
-
       <div className="mt-3">
         <div className="text-xs font-medium text-neutral-600">Amount paid</div>
         <input
@@ -1200,51 +1467,62 @@ function TaxInstallment({
 }
 
 // -----------------------------
-// Minimal self-tests (no framework)
+// Lightweight tests (dev-only)
 // -----------------------------
 
-function assert(cond: boolean, msg: string) {
-  if (!cond) throw new Error(msg);
+function assert(cond: unknown, msg: string) {
+  if (!cond) throw new Error(`Test failed: ${msg}`);
 }
 
-function runSelfTests() {
-  const pLow50 = calcOwnersPolicyPremium(50_000, "low");
-  assert(pLow50.chosen === 209, "Owner policy 50k low should be 209");
-
-  const pHigh50 = calcOwnersPolicyPremium(50_000, "high");
-  assert(pHigh50.chosen === 220, "Owner policy 50k high should be 220");
-
-  const pMid50 = calcOwnersPolicyPremium(50_000, "mid");
-  assert(pMid50.chosen === 214.5, "Owner policy 50k midpoint should be 214.5");
-
-  const pJustOver = calcOwnersPolicyPremium(1_000_001, "mid");
-  assert(pJustOver.chosen === 2750, "Owner policy just over 1M should be 2750");
-
-  const pOver = calcOwnersPolicyPremium(1_010_000, "mid");
-  assert(pOver.chosen === 2750, "Owner policy 1,010,000 should be 2750 (ceil)");
-
-  const pOver2 = calcOwnersPolicyPremium(1_010_001, "mid");
-  assert(pOver2.chosen === 2772, "Owner policy 1,010,001 should be 2772");
-
-  const t = calcIndianaTaxProration(new Date(Date.UTC(2026, 0, 1)), {
-    priorYearTax: 3650,
-    springPaid: false,
-    springPaidAmount: 0,
-    fallPaid: false,
-    fallPaidAmount: 0,
-    prorateThrough: "day_before",
-    force365: true,
-  });
-  assert(t.daysAccrued === 0, "Jan 1 closing day-before should accrue 0 days");
-  assert(round2(t.dailyRate) === 10, "Daily rate 3650/365 should be 10");
+function nearlyEqual(a: number, b: number, eps = 1e-9) {
+  return Math.abs(a - b) <= eps;
 }
 
-try {
-  const anyImportMeta: any = typeof import.meta !== "undefined" ? (import.meta as any) : null;
-  const mode = anyImportMeta && anyImportMeta.env ? anyImportMeta.env.MODE : undefined;
-  const nodeEnv = typeof process !== "undefined" && (process as any).env ? (process as any).env.NODE_ENV : undefined;
-  if (mode === "test" || nodeEnv === "test") runSelfTests();
-} catch (e) {
-  // eslint-disable-next-line no-console
-  console.error("Self-tests failed:", e);
-}
+(function runTestsOnce() {
+  // Avoid running in the browser multiple times during HMR
+  const g = globalThis as any;
+  if (g.__IHT_NET_SHEET_TESTS_RAN__) return;
+  g.__IHT_NET_SHEET_TESTS_RAN__ = true;
+
+  try {
+    // Owner policy: table lookup
+    const p1 = calcOwnersPolicyPremium(50_000, "mid");
+    assert(p1.min === 209 && p1.max === 220, "Owner policy table range at 50k");
+    assert(nearlyEqual(p1.chosen, round2((209 + 220) / 2)), "Owner policy midpoint at 50k");
+
+    // Owner policy: above 1M formula
+    const p2 = calcOwnersPolicyPremium(1_000_001, "mid");
+    assert(p2.mode === "above_1m", "Owner policy above_1m mode");
+    assert(p2.chosen === 2728 + 22 * 1, "Owner policy +$22 per started 10k over 1M");
+
+    // Fee schedule switching
+    assert(getFeeScheduleForCounty("Lake").titleProcessingSeller === 225, "Lake uses Valpo schedule");
+    assert(getFeeScheduleForCounty("Marion").titleProcessingSeller === 175, "Marion uses standard schedule");
+
+    // Tax proration: paid installments reduce debit
+    const closing = new Date(Date.UTC(2026, 0, 10)); // Jan 10, 2026
+    const taxA = calcIndianaTaxProration(closing, {
+      priorYearTax: 3650,
+      springPaid: false,
+      springPaidAmount: 0,
+      fallPaid: false,
+      fallPaidAmount: 0,
+      prorateThrough: "day_before",
+      force365: true,
+    });
+    const taxB = calcIndianaTaxProration(closing, {
+      priorYearTax: 3650,
+      springPaid: true,
+      springPaidAmount: 1000,
+      fallPaid: false,
+      fallPaidAmount: 0,
+      prorateThrough: "day_before",
+      force365: true,
+    });
+    assert(taxB.totalDebit < taxA.totalDebit, "Paid installment reduces total debit");
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(e);
+  }
+})();
+
